@@ -1,12 +1,11 @@
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.util.ArrayList;
-import java.util.List;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
+import javax.net.ssl.*;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.cert.X509Certificate;
 
 public class GitHubFileDownloader {
 
@@ -14,62 +13,80 @@ public class GitHubFileDownloader {
         String token = "tu_token_personal";
         String owner = "tu_usuario";
         String repo = "certificates";
+        String baseUrl = "https://github.enterprise.com/api/v3/repos/";
 
-        HttpClient client = HttpClient.newHttpClient();
+        // Configurar SSL para confiar en todos los certificados
+        try {
+            trustAllCertificates();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
+        }
 
-        List<String> files = getFilesInRepository(client, token, owner, repo);
+        // Descargar archivos del repositorio
+        String[] files = {"archivo1.pem", "archivo2.crt"};
 
         for (String file : files) {
-            downloadFile(client, token, owner, repo, file);
-        }
-    }
-
-    private static List<String> getFilesInRepository(HttpClient client, String token, String owner, String repo) {
-        List<String> files = new ArrayList<>();
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("https://github.enterprise.com/api/v3/repos/" + owner + "/" + repo + "/contents"))
-                .header("Authorization", "token " + token)
-                .build();
-
-        try {
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            JSONArray jsonArray = new JSONArray(response.body());
-
-            for (int i = 0; i < jsonArray.length(); i++) {
-                JSONObject jsonObject = jsonArray.getJSONObject(i);
-                String name = jsonObject.getString("name");
-                files.add(name);
+            try {
+                downloadFile(baseUrl, token, owner, repo, file);
+            } catch (IOException e) {
+                e.printStackTrace();
             }
-        } catch (Exception e) {
-            e.printStackTrace();
         }
-
-        return files;
     }
 
-    private static void downloadFile(HttpClient client, String token, String owner, String repo, String fileName) {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("https://github.enterprise.com/api/v3/repos/" + owner + "/" + repo + "/contents/" + fileName))
-                .header("Authorization", "token " + token)
-                .build();
+    private static void downloadFile(String baseUrl, String token, String owner, String repo, String fileName) throws IOException {
+        String apiUrl = baseUrl + owner + "/" + repo + "/contents/" + fileName + "?access_token=" + token;
+        URL url = new URL(apiUrl);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
 
-        try {
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            JSONObject jsonObject = new JSONObject(response.body());
-            String downloadUrl = jsonObject.getString("download_url");
-
-            HttpRequest downloadRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(downloadUrl))
-                    .header("Authorization", "token " + token)
-                    .build();
-
-            HttpResponse<byte[]> downloadResponse = client.send(downloadRequest, HttpResponse.BodyHandlers.ofByteArray());
-            byte[] fileContents = downloadResponse.body();
-            // Aquí puedes guardar el contenido del archivo como desees
+        int responseCode = connection.getResponseCode();
+        if (responseCode == HttpURLConnection.HTTP_OK) {
+            String downloadUrl = connection.getHeaderField("Location");
+            downloadFileFromUrl(downloadUrl, fileName);
             System.out.println("Archivo descargado: " + fileName);
-        } catch (Exception e) {
-            e.printStackTrace();
+        } else {
+            System.out.println("Error al descargar el archivo: " + fileName);
+            System.out.println("Código de respuesta: " + responseCode);
         }
+    }
+
+    private static void downloadFileFromUrl(String downloadUrl, String fileName) throws IOException {
+        URL url = new URL(downloadUrl);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+
+        int responseCode = connection.getResponseCode();
+        if (responseCode == HttpURLConnection.HTTP_OK) {
+            Files.copy(connection.getInputStream(), Path.of(fileName));
+        } else {
+            System.out.println("Error al descargar el archivo " + fileName);
+            System.out.println("Código de respuesta: " + responseCode);
+        }
+    }
+
+    private static void trustAllCertificates() throws Exception {
+        TrustManager[] trustAllCerts = new TrustManager[]{
+                new X509TrustManager() {
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return null;
+                    }
+
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {
+                    }
+
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {
+                    }
+                }
+        };
+
+        SSLContext sc = SSLContext.getInstance("TLS");
+        sc.init(null, trustAllCerts, new java.security.SecureRandom());
+        HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+
+        // Bypass hostname verification
+        HostnameVerifier allHostsValid = (hostname, session) -> true;
+        HttpsURLConnection.setDefaultHostnameVerifier(allHostsValid);
     }
 }
