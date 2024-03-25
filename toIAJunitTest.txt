@@ -1,0 +1,516 @@
+package com.santander.insurancescertchecker.insurancescertchecker.web;
+
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+@Slf4j
+@Component
+public class Scheduler {
+    @Autowired
+    CertificateController certificateController = new CertificateController();
+
+
+
+    @Scheduled(cron ="${cron.expression}")
+    public void schedule(){
+
+        log.info("Scheduled Task Started...");
+
+        certificateController.loadAndCheck();
+
+        log.info("Scheduled Task Finished.");
+
+    }
+
+
+}
+// @Scheduled(fixedRate = 60000)
+// @Value("${cron.expression}")
+//  private String Task;
+
+
+
+package com.santander.insurancescertchecker.insurancescertchecker.web;
+import java.io.*;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.springframework.stereotype.Component;
+import lombok.extern.slf4j.Slf4j;
+import static com.santander.insurancescertchecker.insurancescertchecker.web.CertificateLoader.entries;
+@Slf4j
+@Component
+public class CertificateReader {
+
+
+    public static ArrayList<String> listDataRead = new ArrayList<>();
+
+    private static String host;
+    private static int remaining;
+    private static int count=0;
+
+        public static void readCert(File file, String password){
+
+            try {
+
+                        if (file.isFile()) {
+                            String extension = "";
+                            int lastDotIndex = file.getPath().lastIndexOf(".");
+                            if (lastDotIndex > 0) {
+                                extension = file.getPath().substring(lastDotIndex + 1);
+                            }
+
+                            switch (extension) {
+                                case "pem" -> pem(file);
+                                case "crt" -> crt(file);
+                                case "p12" -> p12(file, password);
+                                default -> log.error("Extension de archivo no soportada");
+                            }
+                        }
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+        }
+
+        private static void p12(File file, String password) throws KeyStoreException, IOException, CertificateException, NoSuchAlgorithmException {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            FileInputStream fis = new FileInputStream(file);
+           keyStore.load(fis, password.toCharArray());
+
+
+
+            String alias = keyStore.aliases().nextElement();
+            X509Certificate certificate = (X509Certificate) keyStore.getCertificate(alias);
+            String hostSubjectInf = certificate.getSubjectX500Principal().getName();
+
+            String regex = "CN=([^,]+)";
+            Pattern pattern = Pattern.compile(regex);
+            Matcher matcher = pattern.matcher(hostSubjectInf);
+            if (matcher.find()) {
+                host = matcher.group(1);
+            }
+
+            long restDays = calcularDias(certificate.getNotAfter());
+            remaining = status(restDays);
+
+
+            listDataRead.add( entries.get(count)+ "," + host + "," + certificate.getNotAfter() + "," + remaining);
+            count++;
+            fis.close();
+
+        }
+
+
+        private static void pem(File file) throws CertificateException, IOException {
+            FileInputStream fis = new FileInputStream(file);
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
+
+            Collection<List<?>> subjectAltNames = cert.getSubjectAlternativeNames();
+            List<Object> listAltNames = new ArrayList<>();
+
+            if (subjectAltNames != null) {
+                for (List<?> entry : subjectAltNames) {
+
+                    for (Object altName : entry) {
+                        listAltNames.add(altName.toString());
+                    }
+                }
+            } else {
+                log.info("No altenative Names for .pem");
+            }
+
+            long restDays = calcularDias(cert.getNotAfter());
+            remaining = status(restDays);
+
+            listDataRead.add(entries.get(count) + "," + listAltNames.get(1) + "," + cert.getNotAfter() + "," + remaining);
+            count++;
+            fis.close();
+        }
+
+        private static void crt(File file) throws CertificateException, IOException {
+            FileInputStream fis = new FileInputStream(file);
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(fis);
+
+            Collection<List<?>> subjectAltNames = cert.getSubjectAlternativeNames();
+            List<Object> listAltNames = new ArrayList<>();
+
+            if (subjectAltNames != null) {
+                for (List<?> entry : subjectAltNames) {
+
+                    for (Object altName : entry) {
+                        listAltNames.add(altName.toString());
+                    }
+                }
+            } else {
+
+                log.info("No altenative Names for .crt");
+            }
+
+            long restDays = calcularDias(cert.getNotAfter());
+            remaining = status(restDays);
+
+            listDataRead.add(entries.get(count) + "," + listAltNames.get(1) + "," + cert.getNotAfter() + "," + remaining);
+            count++;
+            fis.close();
+        }
+
+
+
+
+    private static long calcularDias(Date noAfter) {
+        LocalDate notAfterDate = noAfter.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate today = LocalDate.now();
+
+        return ChronoUnit.DAYS.between(today, notAfterDate);
+    }
+
+
+
+    private static int status(long restDays) {
+
+       int days = (int) restDays;
+
+        int summary;
+        if (restDays < 0) {
+            summary = 0;
+        } else {
+            summary = days;
+        }
+        return summary;
+    }
+
+
+
+}
+
+
+
+
+
+
+package com.santander.insurancescertchecker.insurancescertchecker.web;
+
+import com.nimbusds.jose.shaded.gson.Gson;
+import com.nimbusds.jose.shaded.gson.JsonObject;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.stereotype.Component;
+
+
+import javax.net.ssl.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import static com.santander.insurancescertchecker.insurancescertchecker.web.CertificateReader.listDataRead;
+
+@Slf4j
+@Component
+public class CertificateLoader {
+
+
+
+    public static List<String> entries = new ArrayList<>();
+    
+
+
+
+    private static void trustAllCertificates() throws Exception {
+        TrustManager[] trustAllCerts = new TrustManager[]{
+                new X509TrustManager() {
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return null;
+                    }
+
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {
+                        // default implementation ignored
+                    }
+
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {
+                        // default implementation ignored
+                    }
+                }
+        };
+
+        SSLContext sc = SSLContext.getInstance("TLS");
+        sc.init(null, trustAllCerts, new java.security.SecureRandom());
+        HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+
+        // Bypass hostname verification
+        HostnameVerifier allHostsValid = (hostname, session) -> true;
+        HttpsURLConnection.setDefaultHostnameVerifier(allHostsValid);
+    }
+
+    public  static String loadCerts(String fileUrl, String token, String password) {
+        String[] name;
+        try {
+
+            trustAllCertificates();
+
+            URL url = new URL(fileUrl);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+
+            int responseCode = connection.getResponseCode();
+
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+
+                InputStream inputStream = connection.getInputStream();
+                log.info("Connected Github Enterprise.");
+
+                ZipInputStream zipInputStream = new ZipInputStream(inputStream);
+                ZipEntry entry;
+                log.info("File Downloaded OK.");
+
+                List<File> files = new ArrayList<>();
+                log.info("Check certificates initialized");
+
+                while ((entry = zipInputStream.getNextEntry()) != null) {
+
+                    if (entry.getName().endsWith(".pem") || entry.getName().endsWith(".p12") || entry.getName().endsWith(".crt")) {
+
+
+                        String extension = null;
+
+                        if (entry.getName().endsWith(".pem")) {
+                            extension = ".pem";
+
+                        } else if (entry.getName().endsWith(".p12")) {
+                            extension = ".p12";
+
+                        } else if (entry.getName().endsWith(".crt")) {
+                            extension = ".crt";
+
+                        }
+                        name = entry.getName().split("/");
+
+                        entries.add(name[1]);
+                        File tempFile = File.createTempFile("temp" + entry.getName(), extension);
+
+
+                        FileOutputStream fos = new FileOutputStream(tempFile);
+
+                        byte[] buffer = new byte[4096];
+                        int lenght;
+                        while ((lenght = zipInputStream.read(buffer)) != -1) {
+                            fos.write(buffer, 0, lenght);
+                        }
+                        fos.close();
+
+
+                        files.add(tempFile);
+
+                    }
+
+                    zipInputStream.closeEntry();
+                }
+
+
+                File[] fileArray = new File[files.size()];
+                fileArray = files.toArray(fileArray);
+
+                for (File file : fileArray) {
+
+                      // System.out.println(file.getName());
+
+                    CertificateReader.readCert(file, password);
+
+                        file.delete();
+                }
+                zipInputStream.close();
+            } else {
+                log.info("Error descargando zip");
+            }
+
+            connection.disconnect();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+
+        Gson gson = new Gson();
+
+        ArrayList<JsonObject> jsonobjects = new ArrayList<>();
+
+
+        for (String str : listDataRead) {
+            String[] parts = str.split(",");
+            JsonObject jsonObject = new JsonObject();
+            jsonObject.addProperty("file_name", parts[0]);
+            jsonObject.addProperty("host", parts[1]);
+            jsonObject.addProperty("exp_date", parts[2]);
+            jsonObject.addProperty("remaining_days", parts[3]);
+            jsonobjects.add(jsonObject);
+        }
+
+        String json = gson.toJson(jsonobjects);
+
+        log.info(json);
+
+        log.info("Check certificates finished");
+        listDataRead.clear();
+        return json;
+    }
+}
+
+
+package com.santander.insurancescertchecker.insurancescertchecker.web;
+
+import com.santander.darwin.core.exceptions.dto.ErrorModelGateway;
+import com.santander.insurancescertchecker.insurancescertchecker.config.CertificateAppConfig;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import lombok.extern.slf4j.Slf4j;
+import static com.santander.insurancescertchecker.insurancescertchecker.web.CertificateLoader.loadCerts;
+
+
+/**
+ * Example controller for
+ * Darwin web applications
+ *
+ * @author Santander Technology
+ */
+
+@RestController
+@RequestMapping("/insurancescertchecker")
+@Slf4j
+@Tag(name = "insurancescertchecker", description = "Check certificate expiration")
+public class CertificateController {
+
+    @Autowired
+    CertificateAppConfig cac = new CertificateAppConfig();
+
+
+    @Operation(summary = "Check certificate expiration")
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "successful operation",
+                    content = @Content(
+                            schema = @Schema(implementation = String.class)
+                    )
+            ),
+            @ApiResponse(
+                    responseCode = "401",
+                    description = "UNAUTHORIZED",
+                    content = @Content(
+                            schema = @Schema(implementation = ErrorModelGateway.class)
+                    )),
+            @ApiResponse(responseCode = "400", description = "Invalid files, folder or zip"),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+
+    })
+
+
+    @GetMapping("/check")
+    public String loadAndCheck() {
+
+        return loadCerts(cac.getFileUrl(),cac.getToken(), cac.getPassword() );
+
+
+    }
+
+
+}
+
+
+package com.santander.insurancescertchecker.insurancescertchecker.config;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+@Slf4j
+@Configuration
+@EnableScheduling
+public class CertificateAppConfig {
+
+
+
+    @Value("${env.password}")
+    private String password;
+
+    @Value("${env.token}")
+    private String token;
+
+
+    @Value("${env.fileUrl}")
+    private String fileUrl;
+
+    @Value("${cron.expression}")
+    private String cronExpression;
+
+
+
+
+    public CertificateAppConfig() {
+        log.info("Constructor invoked to load config from properties");
+
+    }
+
+
+
+
+    public String getPassword() {
+        return password;
+    }
+
+    public String getToken() {
+        return token;
+    }
+
+    public String getFileUrl() {
+        return fileUrl;
+    }
+
+    public String getCronExpression() {
+        return cronExpression;
+    }
+
+
+
+    @Override
+    public String toString() {
+        return "CertificateAppConfig{" +
+                "password='" + password + '\'' +
+                ", token='" + token + '\'' +
+                ", fileUrl='" + fileUrl + '\'' +
+                ", cron_expression='" + cronExpression + '\'' +
+                '}';
+    }
+}
